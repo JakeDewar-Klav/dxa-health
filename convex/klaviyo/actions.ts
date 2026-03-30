@@ -2,7 +2,7 @@
 
 import { internalAction } from "../_generated/server";
 import { v } from "convex/values";
-import { internal } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import { DEMO_ENVIRONMENTS } from "../lib/environments";
 import { klaviyoRequest, klaviyoFetchAllPages } from "./client";
 import {
@@ -463,11 +463,44 @@ export const runHealthCheck = internalAction({
       }
     >();
 
-    // --- Phase 1: lastEventAt for ALL metrics via Events API (350/s burst) ---
-    console.log(`[${args.envId}] Phase 1: Fetching lastEventAt for ${metrics.length} metrics via Events API`);
+    // Load existing metric data to skip redundant Events API calls
+    const existingMetrics = await ctx.runQuery(api.metrics.listByEnv, {
+      envId: args.envId,
+    });
+    const existingByKlaviyoId = new Map(
+      existingMetrics.map((m) => [m.klaviyoMetricId, m]),
+    );
+
+    const twentyFourHoursAgo = Date.now() - 86400000;
+    const thirtyOneDaysAgo = Date.now() - 31 * 86400000;
+
+    const metricsNeedingFetch: KlaviyoMetric[] = [];
+    for (const m of metrics) {
+      const cached = existingByKlaviyoId.get(m.id);
+      if (cached) {
+        if (cached.lastEventAt && cached.lastEventAt >= twentyFourHoursAgo) {
+          metricDataById.set(m.id, {
+            count30d: cached.eventCount30d,
+            lastEventAt: cached.lastEventAt,
+          });
+          continue;
+        }
+        if (cached.isStale && cached.lastEventAt && cached.lastEventAt < thirtyOneDaysAgo) {
+          metricDataById.set(m.id, {
+            count30d: 0,
+            lastEventAt: cached.lastEventAt,
+          });
+          continue;
+        }
+      }
+      metricsNeedingFetch.push(m);
+    }
+
+    // --- Phase 1: lastEventAt for metrics that need a fresh check ---
+    console.log(`[${args.envId}] Phase 1: Fetching lastEventAt for ${metricsNeedingFetch.length}/${metrics.length} metrics (${metrics.length - metricsNeedingFetch.length} cached)`);
     const EVENTS_BATCH = 10;
-    for (let i = 0; i < metrics.length; i += EVENTS_BATCH) {
-      const batch = metrics.slice(i, i + EVENTS_BATCH);
+    for (let i = 0; i < metricsNeedingFetch.length; i += EVENTS_BATCH) {
+      const batch = metricsNeedingFetch.slice(i, i + EVENTS_BATCH);
       const results = await Promise.all(
         batch.map((m) => fetchLastEventTime(apiKey, m.id)),
       );
@@ -477,7 +510,7 @@ export const runHealthCheck = internalAction({
           lastEventAt: results[j],
         });
       }
-      if (i + EVENTS_BATCH < metrics.length) {
+      if (i + EVENTS_BATCH < metricsNeedingFetch.length) {
         await sleep(300);
       }
     }
@@ -513,11 +546,11 @@ export const runHealthCheck = internalAction({
 
       for (const metricId of entry.ids) {
         const count24h = await fetchMetricAggregates(apiKey, metricId, "24h");
-        await sleep(2000);
+        await sleep(500);
         const count7d = await fetchMetricAggregates(apiKey, metricId, "7d");
-        await sleep(2000);
+        await sleep(500);
         const count30d = await fetchMetricAggregates(apiKey, metricId, "30d");
-        await sleep(2000);
+        await sleep(500);
 
         totalCount24h += count24h;
         totalCount7d += count7d;
@@ -566,7 +599,7 @@ export const runHealthCheck = internalAction({
         count30d,
         lastEventAt: existing?.lastEventAt,
       });
-      await sleep(2000);
+      await sleep(500);
     }
 
     const freshness = scoreDataFreshness({ perMetric: perMetricData });
@@ -656,7 +689,7 @@ export const runHealthCheck = internalAction({
         apiKey,
         conversionMetricId,
       );
-      await sleep(35000);
+      await sleep(1000);
 
       const flowReport = await fetchFlowReport(apiKey, conversionMetricId);
 
@@ -813,6 +846,22 @@ export const runHealthCheck = internalAction({
       overallStatus: overall.status,
     });
 
+    const cPerf = campaignPerformance;
+    const fPerf = flowPerformance;
+    const envRecipients = (cPerf?.recipients ?? 0) + (fPerf?.recipients ?? 0);
+    let envOpenRate: number | undefined;
+    let envClickRate: number | undefined;
+    if (envRecipients > 0) {
+      envOpenRate =
+        ((cPerf?.openRate ?? 0) * (cPerf?.recipients ?? 0) +
+          (fPerf?.openRate ?? 0) * (fPerf?.recipients ?? 0)) /
+        envRecipients;
+      envClickRate =
+        ((cPerf?.clickRate ?? 0) * (cPerf?.recipients ?? 0) +
+          (fPerf?.clickRate ?? 0) * (fPerf?.recipients ?? 0)) /
+        envRecipients;
+    }
+
     await ctx.runMutation(internal.environments.upsert, {
       envId: args.envId,
       name: envConfig.name,
@@ -826,28 +875,34 @@ export const runHealthCheck = internalAction({
       analyticsScore: analytics.score,
       formsScore: formsResult.score,
       flowsCampaignsScore: flowsCampaignsResult.score,
+      campaignRecipients30d: realCampaignSends,
+      flowRecipients30d: realFlowSends,
+      totalRevenue30d:
+        (cPerf?.conversionValue ?? 0) + (fPerf?.conversionValue ?? 0),
+      avgOpenRate: envOpenRate,
+      avgClickRate: envClickRate,
     });
 
     const thirtyDaysAgo = Date.now() - 30 * 86400000;
-    for (const m of metrics) {
+    const metricItems = metrics.map((m) => {
       const isCustom = !m.attributes.integration?.name;
       const data = metricDataById.get(m.id);
       const count30d = data?.count30d ?? 0;
-      const lastEventAt = data?.lastEventAt;
+      const mLastEventAt = data?.lastEventAt;
       const isStale =
-        count30d === 0 && (!lastEventAt || lastEventAt < thirtyDaysAgo);
-
-      await ctx.runMutation(internal.metrics.upsert, {
+        count30d === 0 && (!mLastEventAt || mLastEventAt < thirtyDaysAgo);
+      return {
         envId: args.envId,
         klaviyoMetricId: m.id,
         name: m.attributes.name,
         integration: m.attributes.integration?.name,
-        lastEventAt,
+        lastEventAt: mLastEventAt,
         eventCount30d: count30d,
         isCustom,
         isStale,
-      });
-    }
+      };
+    });
+    await ctx.runMutation(internal.metrics.upsertBatch, { items: metricItems });
 
     if (totalEvents24h === 0) {
       await ctx.runMutation(internal.actionItems.create, {

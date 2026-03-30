@@ -24,7 +24,7 @@ export const listStale = query({
 export const listAll = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db.query("metrics").collect();
+    return await ctx.db.query("metrics").take(500);
   },
 });
 
@@ -52,6 +52,37 @@ export const upsert = internalMutation({
       return existing._id;
     }
     return await ctx.db.insert("metrics", args);
+  },
+});
+
+const metricValidator = v.object({
+  envId: v.string(),
+  klaviyoMetricId: v.string(),
+  name: v.string(),
+  integration: v.optional(v.string()),
+  lastEventAt: v.optional(v.number()),
+  eventCount30d: v.number(),
+  isCustom: v.boolean(),
+  isStale: v.boolean(),
+});
+
+export const upsertBatch = internalMutation({
+  args: { items: v.array(metricValidator) },
+  handler: async (ctx, args) => {
+    for (const item of args.items) {
+      const existing = await ctx.db
+        .query("metrics")
+        .withIndex("by_envId_klaviyoId", (q) =>
+          q.eq("envId", item.envId).eq("klaviyoMetricId", item.klaviyoMetricId),
+        )
+        .first();
+
+      if (existing) {
+        await ctx.db.patch(existing._id, item);
+      } else {
+        await ctx.db.insert("metrics", item);
+      }
+    }
   },
 });
 

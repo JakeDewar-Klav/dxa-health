@@ -7,25 +7,30 @@ export const list = query({
     envId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    if (args.envId && args.status) {
+      return await ctx.db
+        .query("actionItems")
+        .withIndex("by_envId_status", (q) =>
+          q.eq("envId", args.envId!).eq("status", args.status!),
+        )
+        .take(200);
+    }
+
     if (args.envId) {
-      const items = await ctx.db
+      return await ctx.db
         .query("actionItems")
         .withIndex("by_envId", (q) => q.eq("envId", args.envId!))
-        .collect();
-      if (args.status) {
-        return items.filter((item) => item.status === args.status);
-      }
-      return items;
+        .take(200);
     }
 
     if (args.status) {
       return await ctx.db
         .query("actionItems")
         .withIndex("by_status", (q) => q.eq("status", args.status!))
-        .collect();
+        .take(200);
     }
 
-    return await ctx.db.query("actionItems").collect();
+    return await ctx.db.query("actionItems").take(200);
   },
 });
 
@@ -37,6 +42,21 @@ export const create = internalMutation({
     description: v.string(),
   },
   handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("actionItems")
+      .withIndex("by_envId_status", (q) =>
+        q.eq("envId", args.envId).eq("status", "open"),
+      )
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("category"), args.category),
+          q.eq(q.field("description"), args.description),
+        ),
+      )
+      .first();
+    if (existing) {
+      return existing._id;
+    }
     return await ctx.db.insert("actionItems", {
       ...args,
       status: "open",
@@ -68,12 +88,13 @@ export const dismiss = mutation({
 export const clearResolved = internalMutation({
   args: { envId: v.string() },
   handler: async (ctx, args) => {
-    const items = await ctx.db
+    const openItems = await ctx.db
       .query("actionItems")
-      .withIndex("by_envId", (q) => q.eq("envId", args.envId))
-      .collect();
+      .withIndex("by_envId_status", (q) =>
+        q.eq("envId", args.envId).eq("status", "open"),
+      )
+      .take(200);
 
-    const openItems = items.filter((item) => item.status === "open");
     for (const item of openItems) {
       await ctx.db.patch(item._id, { status: "resolved", resolvedAt: Date.now() });
     }

@@ -52,36 +52,19 @@ export const getAggregatePerformance = query({
     let totalWeightRecipients = 0;
 
     for (const env of environments) {
-      const latest = await ctx.db
-        .query("healthChecks")
-        .withIndex("by_envId_timestamp", (q) => q.eq("envId", env.envId))
-        .order("desc")
-        .first();
-      if (!latest) continue;
+      const cr = env.campaignRecipients30d ?? 0;
+      const fr = env.flowRecipients30d ?? 0;
+      totalCampaignRecipients += cr;
+      totalFlowRecipients += fr;
 
-      const fc = latest.flowsCampaigns;
-      totalCampaignRecipients += fc.campaignSends30d;
-      totalFlowRecipients += fc.flowSends30d;
-
-      if (fc.campaignPerformance || fc.flowPerformance) {
+      const revenue = env.totalRevenue30d ?? 0;
+      if (revenue > 0 || env.avgOpenRate !== undefined) {
         envsWithData++;
-        const cPerf = fc.campaignPerformance;
-        const fPerf = fc.flowPerformance;
-        totalRevenue +=
-          (cPerf?.conversionValue ?? 0) + (fPerf?.conversionValue ?? 0);
-        const envRecipients =
-          (cPerf?.recipients ?? 0) + (fPerf?.recipients ?? 0);
-        if (envRecipients > 0) {
-          const envOpenRate =
-            ((cPerf?.openRate ?? 0) * (cPerf?.recipients ?? 0) +
-              (fPerf?.openRate ?? 0) * (fPerf?.recipients ?? 0)) /
-            envRecipients;
-          const envClickRate =
-            ((cPerf?.clickRate ?? 0) * (cPerf?.recipients ?? 0) +
-              (fPerf?.clickRate ?? 0) * (fPerf?.recipients ?? 0)) /
-            envRecipients;
-          weightedOpenRate += envOpenRate * envRecipients;
-          weightedClickRate += envClickRate * envRecipients;
+        totalRevenue += revenue;
+        const envRecipients = cr + fr;
+        if (envRecipients > 0 && env.avgOpenRate !== undefined) {
+          weightedOpenRate += (env.avgOpenRate ?? 0) * envRecipients;
+          weightedClickRate += (env.avgClickRate ?? 0) * envRecipients;
           totalWeightRecipients += envRecipients;
         }
       }
@@ -225,6 +208,19 @@ export const store = internalMutation({
     overallStatus: v.union(v.literal("green"), v.literal("yellow"), v.literal("red")),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.insert("healthChecks", args);
+    const id = await ctx.db.insert("healthChecks", args);
+
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const stale = await ctx.db
+      .query("healthChecks")
+      .withIndex("by_envId_timestamp", (q) =>
+        q.eq("envId", args.envId).lt("timestamp", sevenDaysAgo),
+      )
+      .take(50);
+    for (const doc of stale) {
+      await ctx.db.delete(doc._id);
+    }
+
+    return id;
   },
 });

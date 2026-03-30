@@ -15,6 +15,11 @@ export default defineSchema({
     analyticsScore: v.optional(v.number()),
     formsScore: v.optional(v.number()),
     flowsCampaignsScore: v.optional(v.number()),
+    campaignRecipients30d: v.optional(v.number()),
+    flowRecipients30d: v.optional(v.number()),
+    totalRevenue30d: v.optional(v.number()),
+    avgOpenRate: v.optional(v.number()),
+    avgClickRate: v.optional(v.number()),
   }).index("by_envId", ["envId"]),
 
   healthChecks: defineTable({
@@ -206,5 +211,6 @@ export default defineSchema({
   })
     .index("by_envId", ["envId"])
     .index("by_status", ["status"])
-    .index("by_severity_status", ["severity", "status"]),
+    .index("by_severity_status", ["severity", "status"])
+    .index("by_envId_status", ["envId", "status"]),
 });

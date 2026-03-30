@@ -5,7 +5,7 @@ const crons = cronJobs();
 
 crons.interval(
   "health-check-all-environments",
-  { hours: 1 },
+  { hours: 24 },
   internal.klaviyo.actions.runAllHealthChecks
 );
 
